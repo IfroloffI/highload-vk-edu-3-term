@@ -164,7 +164,7 @@ Coinbase — глобальный сервис с фокусом на регул
 
 Используется **географическая DNS-балансировка** через Cloudflare Load Balancing:
 
-- Запрос к `api.coinbase-clone.com` → Cloudflare определяет геолокацию клиента по IP.
+- Запрос к `api.***.com` → Cloudflare определяет геолокацию клиента по IP.
 - Возвращает IP-адрес ближайшего Load Balancer:
   - США/Канада → Load Balancer в `nyc3`
   - Европа → Load Balancer в `ams3`
