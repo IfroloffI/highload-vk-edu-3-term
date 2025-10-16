@@ -295,7 +295,7 @@ Coinbase — глобальный сервис с фокусом на регул
 
 ## 5. Логическая схема БД
 
-<img width="2068" height="1900" alt="ReTagret Global Dependencies" src="https://github.com/user-attachments/assets/8f61c1ad-ec5a-49f6-bfdd-1cc5aa610f77" />
+<img width="2068" height="1775" alt="ReTagret Global Dependencies (1)" src="https://github.com/user-attachments/assets/de9ae1a5-1f13-477b-9ac7-8c96cf672fb3" />
 
 
 ### Описание таблиц
@@ -303,6 +303,7 @@ Coinbase — глобальный сервис с фокусом на регул
 | Таблица | Назначение | Кол-во строк (оценка) | Средний размер записи | Общий объем | QPS (чтение / запись) | Консистентность | Особенности распределения |
 |--------|------------|------------------------|------------------------|--------------|------------------------|------------------|----------------------------|
 | user | Профили пользователей | 120 млн | ~1 KB | ~120 GB | 10K / 50 | **Strong** | Шардирование по `user_id` |
+| session | Сессии пользователей | 5 млн | ~0.3 KB | ~1.5 GB | 1.3K / 1K | **Strong** | `JWT Access + WhiteList Refresh Токенов |
 | kyc_document | KYC-документы (метаданные) | 360 млн | ~0.5 KB | ~180 GB | 100 / 200 | **Strong** | Бинарники — в объектном хранилище (S3/GCS) |
 | currency | Справочник валют (250+ активов) | 250+ | ~0.1 KB | < 1 MB | 1K / 1 | **Strong** | Реплицируется во все регионы |
 | wallet | Балансы по валютам | 30 млрд | ~0.3 KB | ~9 TB | 120K / 120K | **Strong** | Шардирование по `(user_id, currency_code)`; кэш в Redis |
@@ -324,6 +325,138 @@ Coinbase — глобальный сервис с фокусом на регул
   - **Eventual / Best-effort** — для UI, аналитики и логов.
 - **Горячие ключи**: популярные валюты (BTC, ETH, USD) выносятся в отдельные шарды или обрабатываются в выделенных matching engine.  
 - **Архив**: данные старше 90 дней (ордера, транзакции, логи) архивируются в **OLAP + S3**.
+
+---
+
+## 6. Физическая схема БД
+
+```mermaid
+%% Физическая архитектура БД
+
+flowchart TD
+    subgraph nyc3["DigitalOcean nyc3 (США)"]
+        A["PostgreSQL: user, wallet, order, trade"]
+        B["ClickHouse: price_history, audit_log"]
+        C["Redis Cluster: session, market_price"]
+        D["DigitalOcean Spaces: KYC-бинарники"]
+    end
+
+    subgraph ams3["DigitalOcean ams3 (ЕС)"]
+        E["PostgreSQL: реплики user, wallet"]
+        F["ClickHouse: реплика price_history, audit_log"]
+        G["Redis Cluster: реплики session, market_price"]
+    end
+
+    A -->|Асинхронная репликация| E
+    B -->|Репликация| F
+    C -->|Репликация| G
+
+    classDef pg fill:#4F81BD,stroke:#333,color:white;
+    classDef ch fill:#8064A2,stroke:#333,color:white;
+    classDef redis fill:#C0504D,stroke:#333,color:white;
+    classDef spaces fill:#9BBB59,stroke:#333,color:white;
+
+    class A,E pg
+    class B,F ch
+    class C,G redis
+    class D spaces
+```
+
+Физическая схема отражает выбор СУБД, индексов, шардирования и резервирования с учётом:
+- размещения в **DigitalOcean `nyc3` (США)** и **`ams3` (ЕС)**,
+- требований к **strong consistency** для финансовых операций,
+- необходимости **низкой задержки** для matching engine и кошельков,
+- использования **Redis** для кэширования и сессий,
+- и обработки пиковых нагрузок до **120K QPS** на запись.
+
+### 6.1 Выбор СУБД по таблицам
+
+| Таблица | СУБД | Обоснование |
+|--------|------|-------------|
+| `user` | **PostgreSQL** | Strong consistency, уникальность email, KYC-связность. Шарды размещены в `nyc3` и `ams3` по гео-принадлежности пользователя. |
+| `session` | **Redis Cluster** | Высокочастотный доступ к сессиям, TTL для автоматического истечения, low-latency (< 1 мс). Размещён в обоих ДЦ. |
+| `kyc_document` | **PostgreSQL** | Strong consistency, ссылочная целостность с `user`. Бинарники — в **DigitalOcean Spaces (S3-compatible)**. |
+| `currency` | **PostgreSQL (read replica)** | Небольшой справочник, редкие изменения. Реплицируется в оба ДЦ. |
+| `wallet` | **PostgreSQL + Redis (write-through cache)** | Strong consistency критична. **Redis кэширует `balance` и `locked_balance`** с TTL и write-through стратегией. Обновление баланса — через PostgreSQL с последующим обновлением Redis. Это **не приводит к задержкам**, так как matching engine работает в рамках одного шарда и использует атомарные транзакции. |
+| `order` | **PostgreSQL (шардированная)** | Strong consistency, ACID для исполнения ордеров. Шардирование по `(base_currency, quote_currency)`. Все шарды размещены в `nyc3` (основной matching engine) и реплицируются в `ams3` для отказоустойчивости. |
+| `trade` | **PostgreSQL (шардированная)** | Strong consistency, партиционирование по дате. Хранится в том же шарде, что и соответствующие ордера. |
+| `transaction` | **PostgreSQL (шардированная)** | Strong consistency для всех финансовых операций. Шардирование по `user_id`. |
+| `bank_account` | **PostgreSQL** | Strong consistency, чувствительные данные. Все записи — в `nyc3` (интеграция с US-банками). |
+| `withdrawal_request` | **PostgreSQL** | Strong consistency, статус-машина. Шардирование по `user_id`. |
+| `market_price` | **Redis + PostgreSQL (fallback)** | Текущие цены — в Redis (Pub/Sub + TTL). PostgreSQL — для восстановления после сбоя. Реплицируется в оба ДЦ. |
+| `price_history` | **ClickHouse** | Высокая скорость вставки (1.3 млрд/день), аналитика по времени. Размещён в `nyc3`, реплика — в `ams3`. |
+| `audit_log` | **ClickHouse** | Высокая нагрузка на запись (200K QPS), аналитика, compliance. Размещён в `nyc3`, реплика — в `ams3`. |
+
+### 6.2 Индексы
+
+| Таблица | Индексы | Обоснование |
+|--------|--------|-------------|
+| `user` | `PK (user_id)`, `UNIQUE (email)` | Быстрый поиск по ID и email (аутентификация). |
+| `session` | `PK (session_id)`, `INDEX (user_id)` | Валидация токена по `session_id`, отзыв всех сессий по `user_id`. |
+| `kyc_document` | `PK (doc_id)`, `INDEX (user_id)` | Получение документов пользователя. |
+| `currency` | `PK (code)` | Быстрый lookup по коду валюты. |
+| `wallet` | `PK (wallet_id)`, `UNIQUE (user_id, currency_code)` | Уникальность кошелька на пару (пользователь, валюта). |
+| `order` | `PK (order_id)`, `INDEX (base_currency, quote_currency, status, price)`, `INDEX (user_id)` | Matching engine использует составной индекс для стакана. |
+| `trade` | `PK (trade_id)`, `INDEX (executed_at)`, `INDEX (buyer_user_id)`, `INDEX (seller_user_id)` | Аналитика по времени и пользователям. |
+| `transaction` | `PK (tx_id)`, `INDEX (user_id)`, `INDEX (wallet_id)`, `INDEX (external_ref)` | Поиск транзакций по пользователю, кошельку, хешу блокчейна. |
+| `bank_account` | `PK (bank_account_id)`, `INDEX (user_id)` | Получение банковских реквизитов пользователя. |
+| `withdrawal_request` | `PK (request_id)`, `INDEX (user_id)`, `INDEX (destination_address)` | Поиск заявок по пользователю и адресу (антифрода). |
+| `market_price` | — (Redis: hash по `base_currency:quote_currency`) | Redis не использует SQL-индексы. |
+| `price_history` | `PRIMARY KEY (timestamp, base_currency, quote_currency)` | Эффективное партиционирование и сортировка по времени в ClickHouse. |
+| `audit_log` | `PRIMARY KEY (created_at, user_id)` | Быстрый поиск логов по времени и пользователю. |
+
+### 6.3 Денормализация
+
+Цель: **минимизировать JOIN** в высокочастотных read-пути.
+
+| Источник | Денормализация | Комментарий |
+|---------|----------------|-------------|
+| `order` → `trade` | В `trade` дублируются `price`, `amount`, `base_currency`, `quote_currency` | Избегаем JOIN с `order` при аналитике сделок. |
+| `user` → `order` / `trade` | В `order` и `trade` хранятся `user_id` (без JOIN с `user`) | Достаточно для matching engine и отчётов. |
+| `wallet` → `transaction` | В `transaction` хранится `balance_after` (опционально) | Для аудита баланса без реконструкции истории. |
+| `market_price` → UI | Цены кэшируются в Redis и CDN (Cloudflare) | UI не читает напрямую из БД. |
+| `audit_log` → `metadata` | Все контекстные данные — в `jsonb` | Гибкость без схемы. |
+
+> **Примечание**: Полная денормализация профиля (`full_name`, `email`) в `order`/`trade` **не требуется**, так как эти данные редко нужны в hot-path (только в UI, который работает через кэш).
+
+### 6.4 Шардирование и резервирование
+
+| Таблица | Тип шардирования | Цель | Резервирование |
+|--------|------------------|------|----------------|
+| `user`, `kyc_document`, `bank_account`, `withdrawal_request` | **Хэш по `user_id`** | Изоляция данных пользователя, равномерная нагрузка | PostgreSQL: 1 мастер + 2 синхронные реплики в том же ДЦ |
+| `wallet`, `transaction` | **Хэш по `user_id`** | Все операции пользователя — в одном шарде | То же |
+| `order`, `trade` | **Хэш по `(base_currency, quote_currency)`** | Matching engine работает в рамках одной валютной пары | То же, основной шард — в `nyc3` |
+| `price_history`, `audit_log` | **Партиционирование по дате** (ClickHouse) | Эффективное хранение и TTL | ClickHouse: 2 реплики (одна в `nyc3`, одна в `ams3`) |
+| `session` | **Хэш по `user_id`** (Redis Cluster) | Балансировка сессий | Redis: 1 мастер + 2 реплики на слот, в каждом ДЦ |
+| `market_price` | **Нет шардирования** (Redis) | Глобальное состояние | Redis: репликация на 2 ноды в каждом ДЦ |
+| `currency` | **Нет шардирования** | Справочник < 1 MB | PostgreSQL: read replica в каждом ДЦ |
+
+### 6.5 Клиентские библиотеки / интеграции
+
+| СУБД | Библиотеки |
+|------|-----------|
+| **PostgreSQL** | `asyncpg` (Python), `pgx` (Go), `JDBC` (Java) |
+| **Redis** | `redis-py` (Python), `go-redis` (Go), `Lettuce` (Java) |
+| **ClickHouse** | `clickhouse-connect` (Python), `clickhouse-go` (Go), HTTP API |
+| **DigitalOcean Spaces (S3)** | `boto3` (Python), AWS SDK (Java/Go) |
+
+### 6.6 Балансировка запросов / мультиплексирование
+
+| СУБД | Механизм |
+|------|----------|
+| **PostgreSQL** | **PgBouncer** в режиме transaction pooling + **HAProxy** для балансировки между мастером и репликами (только для read-only запросов). |
+| **Redis** | **Cluster-aware клиент** (автоматическое шардирование по CRC16). |
+| **ClickHouse** | **Distributed таблицы** + `load_balancing = 'random'` в конфиге. |
+| **DigitalOcean Spaces** | Встроенный балансировщик DO Spaces. |
+
+### 6.7 Схема резервного копирования
+
+| СУБД | Стратегия |
+|------|----------|
+| **PostgreSQL** | WAL-архивирование + **pgBackRest** (полный бэкап еженедельно, инкрементальный — ежедневно). Реплики — горячий резерв. |
+| **Redis** | **AOF + RDB** с записью на диск каждые 1 сек + репликация. |
+| **ClickHouse** | **clickhouse-backup** + снапшоты в DigitalOcean Spaces. Репликация обеспечивает отказоустойчивость. |
+| **DigitalOcean Spaces (KYC)** | Встроенная репликация (Spaces Standard, 3 AZ). |
 
 ---
 
