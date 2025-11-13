@@ -408,7 +408,7 @@ flowchart TD
     end
 
     subgraph ams3["DigitalOcean ams3 (ЕС) - Резервный ДЦ"]
-        G["PostgreSQL: read-реплики user, wallet, transaction"]
+        G["PostgreSQL: user, wallet, transaction"]
         H["ClickHouse: реплика price_history, audit_log"]
         I["Aerospike Cluster: реплики market_price, session"]
         J["DigitalOcean Spaces: KYC-бинарники (EU)"]
