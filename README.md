@@ -398,41 +398,71 @@
 ```mermaid
 %% Физическая архитектура БД
 flowchart TD
-    subgraph nyc3["DigitalOcean nyc3 (США) - Основной ДЦ"]
-        A["PostgreSQL: user, wallet, order, trade, transaction"]
-        B["ClickHouse: price_history, audit_log"]
-        C["Aerospike Cluster: market_price, order_book, session"]
-        D["DigitalOcean Spaces: KYC-бинарники (US)"]
-        F["Redis Cluster: rate_limits, cache"]
-        R["Redpanda: real-time messaging"]
+    subgraph nyc3["DigitalOcean nyc3 (США) — Home Region для US-резидентов"]
+        A_US["PostgreSQL: user_us, wallet_us, transaction_us"]
+        A_ORD["PostgreSQL: order, trade (pseudonym_id only)"]
+        B_US["ClickHouse: price_history, audit_log_us"]
+        C_US["Aerospike Cluster: market_price, order_book, session"]
+        D_US["DigitalOcean Spaces: kyc-us-prod"]
+        F_US["Redis Cluster: rate_limits, cache_us"]
+        R_US["Redpanda: real-time messaging"]
     end
 
-    subgraph ams3["DigitalOcean ams3 (ЕС) - Резервный ДЦ"]
-        G["PostgreSQL: user, wallet, transaction"]
-        H["ClickHouse: реплика price_history, audit_log"]
-        I["Aerospike Cluster: реплики market_price, session"]
-        J["DigitalOcean Spaces: KYC-бинарники (EU)"]
-        L["Redis Cluster: реплики cache"]
-        R2["Redpanda: replica"]
+    subgraph ams3["DigitalOcean ams3 (ЕС) — Home Region для EU-резидентов"]
+        G_EU["PostgreSQL: user_eu, wallet_eu, transaction_eu"]
+        B_EU["ClickHouse: price_history, audit_log_eu"]
+        C_EU["Aerospike Cluster: market_price, order_book, session"]
+        J_EU["DigitalOcean Spaces: kyc-eu-prod"]
+        F_EU["Redis Cluster: rate_limits, cache_eu"]
+        R_EU["Redpanda: replica stream"]
     end
 
-    %% Репликация данных
-    A -->|Асинхронная репликация для Not Only Home таблиц| G
-    B -->|Репликация| H
-    C -->|XDR Cross-DC репликация| I
-    F -->|Асинхронная репликация| L
-    R -->|Real-time репликация| R2
-    
+    %% Внутрирегиональные реплики (HA/DR, не кросс-DC для ПДн)
+    subgraph nyc3_local_dr["nyc3 (локальный DR)"]
+        A_US_REPL["PostgreSQL: user_us*, wallet_us*, transaction_us*"]
+    end
+
+    subgraph ams3_local_dr["ams3 (локальный DR)"]
+        G_EU_REPL["PostgreSQL: user_eu*, wallet_eu*, transaction_eu*"]
+    end
+
+    %% Репликация — только разрешённая (без ПДн между регионами)
+    A_US -->|Синхронная репликация (HA)| A_US_REPL
+    G_EU -->|Синхронная репликация (HA)| G_EU_REPL
+
+    A_ORD -->|Публикация агрегатов, событий (анонимизированных)| R_US
+    R_US -->|Real-time репликация потоков| R_EU
+
+    B_US -.->|Репликация **только** price_history| B_EU
+    B_EU -.->|Репликация **только** price_history| B_US
+
+    C_US -->|XDR: market_price, order_book, анонимный session| C_EU
+    C_EU -->|XDR| C_US
+
+    F_US -.->|rate_limits (глобальные, без ПДн)| F_EU
+    F_EU -.->|rate_limits| F_US
+
     %% Внутренние связи
-    C -->|Real-time данные| A
-    C -->|Агрегация метрик| B
-    F -->|Кэш балансов| A
-    R -->|Сообщения котировок| C
-    R -->|Сообщения котировок| I
+    C_US -->|Запросы балансов (по pseudonym_id → user_us)| A_US
+    C_EU -->|Запросы балансов (по pseudonym_id → user_eu)| G_EU
 
-    %% KYC-данные остаются в Home Region
-    KYC_US["KYC Service (US)"] --> D
-    KYC_EU["KYC Service (EU)"] --> J
+    F_US -->|Кэширование балансов, сессий (US)| A_US
+    F_EU -->|Кэширование балансов, сессий (EU)| G_EU
+
+    R_US -->|События котировок, трейдов| C_US
+    R_EU -->|События котировок, трейдов| C_EU
+
+    %% KYC — строго локально
+    KYC_US["KYC Service (US)"] -->|Загрузка/валидация| D_US
+    KYC_EU["KYC Service (EU)"] -->|Загрузка/валидация| J_EU
+
+    %% ЗАПРЕЩЁННЫЕ связи (визуально выключены)
+    A_US -.->|✗ НЕТ репликации в ams3| G_EU
+    G_EU -.->|✗ НЕТ репликации в nyc3| A_US
+    A_US -.->|✗ НЕТ репликации audit_log_us| B_EU
+    G_EU -.->|✗ НЕТ репликации audit_log_eu| B_US
+    D_US -.->|✗ НЕТ копирования KYC в EU| J_EU
+    J_EU -.->|✗ НЕТ копирования KYC в US| D_US
 
     classDef pg fill:#4F81BD,stroke:#333,color:white;
     classDef ch fill:#8064A2,stroke:#333,color:white;
@@ -441,14 +471,16 @@ flowchart TD
     classDef spaces fill:#9BBB59,stroke:#333,color:white;
     classDef redpanda fill:#D4AF37,stroke:#333,color:black;
     classDef service fill:#4A86E8,stroke:#333,color:white;
+    classDef forbidden stroke:#FF0000,stroke-width:1px,stroke-dasharray: 4 2;
 
-    class A,G pg
-    class B,H ch
-    class C,I aerospike
-    class F,L redis
-    class D,J spaces
-    class R,R2 redpanda
+    class A_US,A_ORD,G_EU,A_US_REPL,G_EU_REPL pg
+    class B_US,B_EU ch
+    class C_US,C_EU aerospike
+    class F_US,F_EU redis
+    class D_US,J_EU spaces
+    class R_US,R_EU redpanda
     class KYC_US,KYC_EU service
+    class A_US,G_EU,D_US,J_EU,audit_log_us,audit_log_eu forbidden
 ```
 
 Физическая схема отражает выбор СУБД, индексов, шардирования и резервирования с учётом:
@@ -703,12 +735,12 @@ flowchart TD
 | **NGINX Ingress Controller** | **N×2** (2 инстанса на ДЦ), DaemonSet в 2 AZ внутри ДЦ | Развёрнут на выделенных нодах с `podAntiAffinity`. Поддерживает `keep-alive` (10⁷ запросов/соединение), `reuseport`, `tcp_nodelay=on`. При падении одного инстанса — трафик перераспределяется на второй без потерь. |
 | **Kubernetes Control Plane** | Managed-кластер DigitalOcean (Kubernetes 1.31+) | DO гарантирует **99.95% SLA** для control plane. etcd — 3 ноды, синхронная запись кворума, шифрование на диске. Backups — ежечасно. |
 | **Kubernetes Worker Nodes** | **Минимум 8 нод на ДЦ**, 2 AZ, `podAntiAffinity`, `topologySpreadConstraints` | Каждый критический сервис (`matching-engine`, `wallet-service`) гарантированно запущен минимум в 2 AZ. Автомасштабирование по CPU/mem (HPA) + кластер-автоскейлер. При падении ноды — Pod пересоздаётся на здоровой ноде за <30 сек. |
-| **PostgreSQL (пользовательские данные)** | **1 мастер + 2 синхронные реплики в Home Region**, асинхронная реплика в резервный ДЦ | Для таблиц `user`, `wallet`, `transaction` в Home Region пользователя. При потере мастера — реплика автоматически повышается. Full backup еженедельно, incr — ежедневно через `pgBackRest`. RPO ≈ 0, RTO < 60 сек. |
-| **PostgreSQL (торговые данные)** | **1 мастер + 2 реплики в `nyc3`**, асинхронная реплика в `ams3` | Для таблиц `order`, `trade` в основном ДЦ. Strong consistency для matching engine. WAL-архивирование в Spaces с 30-дневным retention. |
-| **Aerospike (рыночные данные)** | **2 реплики на слот**, cross-DC репликация через XDR | Для `market_price`, `order_book`, `session`. Predictable low latency (<1 мс) с strong consistency. Автоматический failover при потере ноды. |
-| **Redis Cluster** | **1 мастер + 2 реплики на слот**, 6+ нод в 2 AZ | Для кэширования балансов, rate limiting. AOF + RDB: `appendfsync everysec`. Все write-операции — только на мастер-слот. RTO < 5 сек. |
-| **ClickHouse (аналитика)** | **2 реплики** (одна в `nyc3`, одна в `ams3`) в Distributed-таблицах | Для `price_history`, `audit_log`. Таблицы `ReplicatedMergeTree()` обеспечивают идемпотентную вставку. Backup через `clickhouse-backup` → Spaces (ежедневно, 7 дней). |
-| **DigitalOcean Spaces (KYC)** | **3-кратная репликация в 3 AZ**, региональные бакеты | Spaces Standard гарантирует 99.999999999% durability. KYC-документы хранятся в регионе Home Region пользователя. Данные шифруются AES-256 at rest. |
+| **PostgreSQL (пользовательские данные — EU)** | **1 мастер + 2 синхронные реплики в `ams3`**, асинхронная реплика в `ams3` (DR) | Для таблиц `user_eu`, `wallet_eu`, `transaction_eu`. Данные EU-резидентов **не покидают ЕС**. При потере мастера — автоматический failover в `ams3`. Full backup еженедельно, incr — ежедневно через `pgBackRest`. RPO ≈ 0, RTO < 60 сек. |
+| **PostgreSQL (пользовательские данные — US)** | **1 мастер + 2 синхронные реплики в `nyc3`**, асинхронная реплика в `nyc3` (DR) | Для таблиц `user_us`, `wallet_us`, `transaction_us`. Данные US-резидентов **не реплицируются в `ams3`**. Аналогичный HA/DR-SLA: RPO ≈ 0, RTO < 60 сек. |
+| **PostgreSQL (торговые данные — глобальные)** | **1 мастер + 2 реплики в `nyc3`**, асинхронная реплика в `ams3` | Для таблиц `order`, `trade`. Хранятся в `nyc3` (основной matching engine). Используется `pseudonym_id` вместо `user_id`; mapping — только в региональных БД (`user_eu`/`user_us`). WAL-архивирование в Spaces с 30-дневным retention. |
+| **Aerospike (рыночные данные)** | **2 реплики на слот**, cross-DC репликация через XDR (`nyc3` ↔ `ams3`) | Для `market_price`, `order_book`, `session`. Все данные анонимизированы/публичны. `session.id` — UUID без привязки к ПДн. Strong consistency внутри ДЦ, eventual — между ДЦ. Автоматический failover. Latency < 1 мс. |
+| **ClickHouse (история и аудит)** | **Кластер в `nyc3` + кластер в `ams3`**, репликация `price_history` между ДЦ, `audit_log_*` — строго по регионам | `price_history` — глобальная, реплицируется. `audit_log_us` (в `nyc3`) и `audit_log_eu` (в `ams3`) — **не реплицируются кросс-регион**. Данные аудита хранятся в Home Region пользователя. |
+| **DigitalOcean Spaces (KYC)** | **Раздельные бакеты**: `kyc-us-prod` (в `nyc3`, US-only), `kyc-eu-prod` (в `ams3`, EU-only) | Бинарные KYC-документы хранятся **строго в регионе резидентства**. Доступ — только через региональный KYC Service. Шифрование at-rest + TLS in-transit. Retention — 7 лет (согласно AML/GDPR). |
 | **Matching Engine** | **Выделенные Pod'ы с CPU pinning + 2 реплики**, `podDisruptionBudget: minAvailable=1` | Каждый инстанс работает с `guaranteed QoS`. При crash'е — Kubernetes пересоздаёт Pod. Adaptive Order Book Partitioning для миграции "горячих" пар. |
 | **Сервисы (Auth, Wallet, KYC)** | **2+ реплики**, `livenessProbe`/`readinessProbe`, circuit breaker | Circuit breaker при >5% ошибок → fallback. Retry с jitter и exponential backoff (до 3 попыток). Timeout на все вызовы — 500 мс. |
 | **Сеть внутри ДЦ** | **Cilium + eBPF**, multi-homing (2×40G на ингресс-ноде) | Минимизация latency (<0.1 мс между Pod'ами), L7 visibility через Hubble. При обрыве одного uplink'а — автоматический failover на резервный. |
