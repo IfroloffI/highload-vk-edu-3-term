@@ -168,7 +168,7 @@
   - **Остальные регионы** → Load Balancer в `nyc3` (fallback)
 
 **Обработка write-запросов**:
-- Европейские пользователи → `ams3` → HTTP 302 Redirect → `nyc3`
+- Европейские пользователи → `ams3` → локальное обсуживание, но matching в `nyc3`
 - Американские пользователи → `nyc3` → прямое обслуживание
 
 **Преимущества**:
@@ -409,7 +409,7 @@ flowchart TD
     end
 
     subgraph ams3["DigitalOcean ams3 (ЕС) - Резервный ДЦ"]
-        G["PostgreSQL: реплики user (EU), wallet (EU)"]
+        G["PostgreSQL: user (EU), wallet (EU)"]
         H["ClickHouse: реплика price_history, audit_log"]
         I["Aerospike Cluster: реплики market_price, session"]
         J["DigitalOcean Spaces: KYC-бинарники (EU)"]
