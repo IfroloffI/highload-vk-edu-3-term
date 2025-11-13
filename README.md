@@ -348,13 +348,12 @@
 
 ## 5. Логическая схема БД
 
-### Стратегия распределения данных на основе Home Region
+**Стратегия распределения данных**
+Для обеспечения консистентности финансовых операций все данные, связанные с торговлей, централизованы в основном ДЦ (`nyc3`). KYC-данные хранятся в регионе пользователя для compliance.
 
-В соответствии с архитектурой Active-Passive и регуляторными требованиями, данные пользователей жестко привязаны к их домашнему региону (Home Region), который определяется при регистрации на основе геолокации и юридических требований. Финансовые операции (ордера, сделки) централизованы в основном дата-центре (`nyc3`) для обеспечения консистентности и упрощения логики matching engine.
-
-- **Данные в Home Region пользователя**: `user`, `kyc_document`, `wallet`, `transaction`, `bank_account`, `withdrawal_request`
-- **Данные в основном ДЦ (`nyc3`)**: `order`, `trade` 
-- **Глобально реплицируемые/кэшируемые данные**: `currency`, `market_price`, `price_history`, `audit_log`
+- **Данные в основном ДЦ (`nyc3`)**: `user`, `wallet`, `transaction`, `order`, `trade`, `withdrawal_request`, `bank_account`
+- **KYC-данные в Home Region**: `kyc_document` (метаданные + бинарники в региональном Spaces)
+- **Глобально реплицируемые/кэшируемые данные**: `currency`, `market_price`, `price_history`, `audit_log`, `session`
 
 // TODO: добавить регион пользователя в таблицу
 <img width="2068" height="1775" alt="ReTagret Global Dependencies (1)" src="https://github.com/user-attachments/assets/de9ae1a5-1f13-477b-9ac7-8c96cf672fb3" />
@@ -400,7 +399,7 @@
 %% Физическая архитектура БД
 flowchart TD
     subgraph nyc3["DigitalOcean nyc3 (США) - Основной ДЦ"]
-        A["PostgreSQL: user (US), wallet (US), order, trade"]
+        A["PostgreSQL: user, wallet, order, trade, transaction"]
         B["ClickHouse: price_history, audit_log"]
         C["Aerospike Cluster: market_price, order_book, session"]
         D["DigitalOcean Spaces: KYC-бинарники (US)"]
@@ -409,7 +408,7 @@ flowchart TD
     end
 
     subgraph ams3["DigitalOcean ams3 (ЕС) - Резервный ДЦ"]
-        G["PostgreSQL: user (EU), wallet (EU)"]
+        G["PostgreSQL: read-реплики user, wallet, transaction"]
         H["ClickHouse: реплика price_history, audit_log"]
         I["Aerospike Cluster: реплики market_price, session"]
         J["DigitalOcean Spaces: KYC-бинарники (EU)"]
@@ -431,12 +430,17 @@ flowchart TD
     R -->|Сообщения котировок| C
     R -->|Сообщения котировок| I
 
+    %% KYC-данные остаются в Home Region
+    KYC_US["KYC Service (US)"] --> D
+    KYC_EU["KYC Service (EU)"] --> J
+
     classDef pg fill:#4F81BD,stroke:#333,color:white;
     classDef ch fill:#8064A2,stroke:#333,color:white;
     classDef aerospike fill:#FF6B35,stroke:#333,color:white;
     classDef redis fill:#C0504D,stroke:#333,color:white;
     classDef spaces fill:#9BBB59,stroke:#333,color:white;
     classDef redpanda fill:#D4AF37,stroke:#333,color:black;
+    classDef service fill:#4A86E8,stroke:#333,color:white;
 
     class A,G pg
     class B,H ch
@@ -444,6 +448,7 @@ flowchart TD
     class F,L redis
     class D,J spaces
     class R,R2 redpanda
+    class KYC_US,KYC_EU service
 ```
 
 Физическая схема отражает выбор СУБД, индексов, шардирования и резервирования с учётом:
