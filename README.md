@@ -398,71 +398,37 @@
 ```mermaid
 %% Физическая архитектура БД
 flowchart TD
-    subgraph nyc3["DigitalOcean nyc3 (США) — Home Region для US-резидентов"]
-        A_US["PostgreSQL: user_us, wallet_us, transaction_us"]
-        A_ORD["PostgreSQL: order, trade (pseudonym_id only)"]
-        B_US["ClickHouse: price_history, audit_log_us"]
-        C_US["Aerospike Cluster: market_price, order_book, session"]
-        D_US["DigitalOcean Spaces: kyc-us-prod"]
-        F_US["Redis Cluster: rate_limits, cache_us"]
-        R_US["Redpanda: real-time messaging"]
+    subgraph nyc3["DigitalOcean nyc3 (США) - Основной ДЦ"]
+        A["PostgreSQL: user (US), wallet (US), order, trade"]
+        B["ClickHouse: price_history, audit_log"]
+        C["Aerospike Cluster: market_price, order_book, session"]
+        D["DigitalOcean Spaces: KYC-бинарники (US)"]
+        F["Redis Cluster: rate_limits, cache"]
+        R["Redpanda: real-time messaging"]
     end
 
-    subgraph ams3["DigitalOcean ams3 (ЕС) — Home Region для EU-резидентов"]
-        G_EU["PostgreSQL: user_eu, wallet_eu, transaction_eu"]
-        B_EU["ClickHouse: price_history, audit_log_eu"]
-        C_EU["Aerospike Cluster: market_price, order_book, session"]
-        J_EU["DigitalOcean Spaces: kyc-eu-prod"]
-        F_EU["Redis Cluster: rate_limits, cache_eu"]
-        R_EU["Redpanda: replica stream"]
+    subgraph ams3["DigitalOcean ams3 (ЕС) - Резервный ДЦ"]
+        G["PostgreSQL: реплики user (EU), wallet (EU)"]
+        H["ClickHouse: реплика price_history, audit_log"]
+        I["Aerospike Cluster: реплики market_price, session"]
+        J["DigitalOcean Spaces: KYC-бинарники (EU)"]
+        L["Redis Cluster: реплики cache"]
+        R2["Redpanda: replica"]
     end
 
-    %% Внутрирегиональные реплики (HA/DR, не кросс-DC для ПДн)
-    subgraph nyc3_local_dr["nyc3 (локальный DR)"]
-        A_US_REPL["PostgreSQL: user_us*, wallet_us*, transaction_us*"]
-    end
-
-    subgraph ams3_local_dr["ams3 (локальный DR)"]
-        G_EU_REPL["PostgreSQL: user_eu*, wallet_eu*, transaction_eu*"]
-    end
-
-    %% Репликация — только разрешённая (без ПДн между регионами)
-    A_US -->|Синхронная репликация (HA)| A_US_REPL
-    G_EU -->|Синхронная репликация (HA)| G_EU_REPL
-
-    A_ORD -->|Публикация агрегатов, событий (анонимизированных)| R_US
-    R_US -->|Real-time репликация потоков| R_EU
-
-    B_US -.->|Репликация **только** price_history| B_EU
-    B_EU -.->|Репликация **только** price_history| B_US
-
-    C_US -->|XDR: market_price, order_book, анонимный session| C_EU
-    C_EU -->|XDR| C_US
-
-    F_US -.->|rate_limits (глобальные, без ПДн)| F_EU
-    F_EU -.->|rate_limits| F_US
-
+    %% Репликация данных
+    A -->|Асинхронная репликация только No Only Home таблиц| G
+    B -->|Репликация| H
+    C -->|XDR Cross-DC репликация| I
+    F -->|Асинхронная репликация| L
+    R -->|Real-time репликация| R2
+    
     %% Внутренние связи
-    C_US -->|Запросы балансов (по pseudonym_id → user_us)| A_US
-    C_EU -->|Запросы балансов (по pseudonym_id → user_eu)| G_EU
-
-    F_US -->|Кэширование балансов, сессий (US)| A_US
-    F_EU -->|Кэширование балансов, сессий (EU)| G_EU
-
-    R_US -->|События котировок, трейдов| C_US
-    R_EU -->|События котировок, трейдов| C_EU
-
-    %% KYC — строго локально
-    KYC_US["KYC Service (US)"] -->|Загрузка/валидация| D_US
-    KYC_EU["KYC Service (EU)"] -->|Загрузка/валидация| J_EU
-
-    %% ЗАПРЕЩЁННЫЕ связи (визуально выключены)
-    A_US -.->|✗ НЕТ репликации в ams3| G_EU
-    G_EU -.->|✗ НЕТ репликации в nyc3| A_US
-    A_US -.->|✗ НЕТ репликации audit_log_us| B_EU
-    G_EU -.->|✗ НЕТ репликации audit_log_eu| B_US
-    D_US -.->|✗ НЕТ копирования KYC в EU| J_EU
-    J_EU -.->|✗ НЕТ копирования KYC в US| D_US
+    C -->|Real-time данные| A
+    C -->|Агрегация метрик| B
+    F -->|Кэш балансов| A
+    R -->|Сообщения котировок| C
+    R -->|Сообщения котировок| I
 
     classDef pg fill:#4F81BD,stroke:#333,color:white;
     classDef ch fill:#8064A2,stroke:#333,color:white;
@@ -470,17 +436,13 @@ flowchart TD
     classDef redis fill:#C0504D,stroke:#333,color:white;
     classDef spaces fill:#9BBB59,stroke:#333,color:white;
     classDef redpanda fill:#D4AF37,stroke:#333,color:black;
-    classDef service fill:#4A86E8,stroke:#333,color:white;
-    classDef forbidden stroke:#FF0000,stroke-width:1px,stroke-dasharray: 4 2;
 
-    class A_US,A_ORD,G_EU,A_US_REPL,G_EU_REPL pg
-    class B_US,B_EU ch
-    class C_US,C_EU aerospike
-    class F_US,F_EU redis
-    class D_US,J_EU spaces
-    class R_US,R_EU redpanda
-    class KYC_US,KYC_EU service
-    class A_US,G_EU,D_US,J_EU,audit_log_us,audit_log_eu forbidden
+    class A,G pg
+    class B,H ch
+    class C,I aerospike
+    class F,L redis
+    class D,J spaces
+    class R,R2 redpanda
 ```
 
 Физическая схема отражает выбор СУБД, индексов, шардирования и резервирования с учётом:
