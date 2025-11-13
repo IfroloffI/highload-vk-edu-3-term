@@ -709,6 +709,7 @@ flowchart TD
 | **Мониторинг (Prometheus + VictoriaMetrics)** | **Федеративный Prometheus (2 инстанса/ДЦ)** + **VictoriaMetrics кластер** | Prometheus для short-term метрик, VictoriaMetrics для long-term хранения (~20 TB/год). Alertmanager с маршрутизацией в Slack/PagerDuty. |
 | **CI/CD и деплой** | **Blue/Green через Argo Rollouts**, автоматический откат при >1% ошибок | Canary-деплой: сначала 5% трафик → анализ метрик (latency, error rate) → полный rollout. Rollback — за <10 сек. |
 | **Регуляторное соответствие** | **Гео-локализация данных**, шифрование at rest & in transit, audit trail | KYC-документы хранятся только в юрисдикции пользователя (GDPR). TLS 1.3 everywhere. Полный audit log → ClickHouse. Ежеквартальные pentest'ы. |
+// TODO: Graceful Deg.
 
 ---
 
