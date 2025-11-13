@@ -523,6 +523,29 @@ flowchart TD
 
 ---
 
+## 9. Обеспечение надёжности
+
+| Компонент | Способ резервирования | Детали и обоснование |
+|-----------|------------------------|----------------------|
+| **Дата-центры (DC)** | **Географическая отказоустойчивость**: `nyc3` (США) + `ams3` (ЕС) с GeoDNS + Anycast | Cloudflare Load Balancing с health-check и автоматическим failover. При полном отказе `nyc3` весь трафик перенаправляется в `ams3` (с ростом latency до ~80 мс для US-пользователей, но без downtime). Все финансовые данные (`wallet`, `order`) реплицируются синхронно внутри ДЦ и асинхронно между ДЦ. |
+| **Глобальный трафик (Cloudflare)** | Anycast (Spectrum) + Rate Limiting + DDoS Protection | Anycast обеспечивает <10 мс latency для публичных данных (цены), а также устойчивость к L3/L4-атакам. Rate limiting (10K RPS/IP) + JS-challenge для ботов защищает origin. Health checks каждые 5 сек. |
+| **L4 Load Balancer (HAProxy/Envoy)** | **Active/Passive** (2 инстанса: 1 primary + 1 standby) с Keepalived/VRRP | Автоматическое переключение за <1 сек при отказе. Работает без TLS (termination — на Cloudflare), что снижает overhead. Мониторинг через Prometheus + Alertmanager. |
+| **NGINX Ingress Controller** | **N×2** (2 инстанса на ДЦ), DaemonSet в 2 AZ внутри ДЦ | Развёрнут на выделенных нодах с `podAntiAffinity`. Поддерживает `keep-alive` (10⁷ запросов/соединение), `reuseport`, `tcp_nodelay=on`. При падении одного инстанса — трафик перераспределяется на второй без потерь (L4 → оставшийся Ingress). |
+| **Kubernetes Control Plane** | Managed-кластер DigitalOcean (Kubernetes 1.31+) | DO гарантирует **99.95% SLA** для control plane. etcd — 3 ноды, синхронная запись кворума, шифрование на диске. Backups — ежечасно. |
+| **Kubernetes Worker Nodes** | **Минимум 8 нод на ДЦ**, 2 AZ, `podAntiAffinity`, `topologySpreadConstraints` | Каждый критический сервис (`matching-engine`, `wallet-service`) гарантированно запущен минимум в 2 AZ. Автомасштабирование по CPU/mem (HPA) + кластер-автоскейлер (CA). При падении ноды — Pod пересоздаётся на здоровой ноде за <30 сек. |
+| **PostgreSQL (финансовые таблицы: `user`, `wallet`, `order`, `transaction`)** | **1 мастер + 2 синхронные реплики** в том же ДЦ (3 AZ), **асинхронная реплика в другом ДЦ**, WAL-архивирование в Spaces | Используется `synchronous_commit = remote_write`, `synchronous_standby_names = 'ANY 1 (replica1, replica2)'`. При потере мастера — реплика автоматически повышается (через `repmgr` или Patroni). Full backup еженедельно, incr — ежедневно через `pgBackRest`, хранение в Spaces с 30-дневным retention. RPO ≈ 0, RTO < 60 сек. |
+| **Redis Cluster (сессии, балансы, цены)** | **1 мастер + 2 реплики на слот**, 6+ нод (3 шарда × 2 реплики), размещение в 2 AZ | Автоматический failover через встроенный механизм (`cluster-node-timeout = 15000`). AOF + RDB: `appendfsync everysec`, `save 900 1`. Все write-операции — только на мастер-слот. Клиенты используют `MOVED`/`ASK` для перенаправления. RTO < 5 сек. |
+| **ClickHouse (аналитика: `price_history`, `audit_log`)** | **2 реплики** (одна в `nyc3`, одна в `ams3`) в Distributed-таблицах, ZooKeeper для координации | Таблицы `ReplicatedMergeTree()` обеспечивают идемпотентную вставку. При потере ноды — запросы перераспределяются на реплику. Backup через `clickhouse-backup` → Spaces (ежедневно, 7 дней). |
+| **DigitalOcean Spaces (KYC-бинарники)** | **3-кратная репликация в 3 AZ**, встроенная geo-репликация (AMS ↔ NYC) | Spaces Standard гарантирует 99.999999999% durability. Данные шифруются AES-256 at rest. Доступ — через приватные endpoint’ы (VPC), без публичного internet-трафика. |
+| **Matching Engine (Liquibook-based)** | **Выделенные Pod’ы с CPU pinning + 2 реплики на шард**, `podDisruptionBudget: minAvailable=1` | Каждый инстанс работает в отдельном Pod’е с `resources.limits.cpu = 8`, `guaranteed QoS`. При crash’е — Kubernetes пересоздаёт Pod. Для «горячих» пар — динамическая миграция стаканов на резервные capacity-ноды (Adaptive Partitioning). |
+| **Сервисы (Auth, Wallet, KYC, Notification)** | **2+ реплики**, `livenessProbe`/`readinessProbe`, circuit breaker (Resilience4j / Hystrix) | Circuit breaker при >5% ошибок → fallback (например, кэш цен вместо origin). Retry с jitter и exponential backoff (до 3 попыток). Timeout на все вызовы — 500 мс. |
+| **Сеть внутри ДЦ** | **Cilium в режиме eBPF**, отказ от `kube-proxy`/`iptables`, multi-homing (2×40G на ингресс-ноде) | Минимизация latency (<0.1 мс между Pod’ами), L7 visibility через Hubble. При обрыве одного uplink’а — автоматический failover на резервный. |
+| **Логирование и мониторинг** | **Федеративный Prometheus (2 инстанса/ДЦ)** + **Grafana HA**, логи в Loki с репликацией | Alertmanager с маршрутизацией в Slack/PagerDuty. Loki: 2 реплики, WAL для durability. Все логи — структурированные (JSON), с `trace_id`. |
+| **CI/CD и деплой** | **Blue/Green через Argo Rollouts**, автоматический откат при >1% ошибок | Canary-деплой: сначала 5% трафика → анализ метрик (latency, error rate) → полный rollout. Rollback — за <10 сек. Все образы — signed (cosign), проверка SBOM. |
+| **Регуляторное соответствие (Compliance)** | **Гео-локализация данных**: KYC → ДЦ по резидентству, шифрование at rest & in transit, audit trail | Все KYC-документы хранятся только в юрисдикции пользователя (GDPR/CCPA). TLS 1.3 everywhere. Полный audit log (`audit_log`) → ClickHouse → SIEM (Wazuh). Ежеквартальные pentest’ы и SOC 2 Type II аудит. |
+
+---
+
 ## Список используемых источников
 
 1. **Coinbase Users Statistics (2025) – Worldwide Data**  
