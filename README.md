@@ -512,8 +512,9 @@
 - соответствия регуляторным требованиям (**GDPR**, **MiCA**, **SEC**)
 
 ```mermaid
-flowchart TD
-    subgraph nyc3["DigitalOcean nyc3 (США) — Global Trading Core + US Home Region"]
+flowchart LR
+    subgraph nyc3["DigitalOcean nyc3 (США)"]
+        direction TB
         A["PostgreSQL (US PII):<br/>user_us, wallet_us,<br/>transaction_us, kyc_document_us"]
         B["ClickHouse:<br/>price_history, audit_log_us"]
         C["Aerospike:<br/>order_book (мастер),<br/>market_price (мастер),<br/>session (мастер)"]
@@ -522,7 +523,8 @@ flowchart TD
         F["Redpanda:<br/>trading_events,<br/>price_updates,<br/>audit_events"]
     end
 
-    subgraph ams3["DigitalOcean ams3 (ЕС) — EU Home Region"]
+    subgraph ams3["DigitalOcean ams3 (ЕС)"]
+        direction TB
         G["PostgreSQL (EU PII):<br/>user_eu, wallet_eu,<br/>transaction_eu, kyc_document_eu"]
         H["ClickHouse:<br/>price_history_replica,<br/>audit_log_eu"]
         I["Aerospike:<br/>order_book (реплика),<br/>market_price (реплика),<br/>session (реплика)"]
