@@ -829,6 +829,18 @@ flowchart TD
 
 ---
 
+## 10. Схема проекта
+
+// Href will be here =)
+
+---
+
+## 11. Список серверов
+
+// TODO
+
+---
+
 ## Список используемых источников
 
 1. **Coinbase Users Statistics (2025) – Worldwide Data**  
