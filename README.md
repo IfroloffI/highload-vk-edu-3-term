@@ -513,38 +513,47 @@
 
 ```mermaid
 flowchart LR
-    subgraph nyc3["DigitalOcean nyc3 (США)"]
+    subgraph nyc3["DigitalOcean nyc3 (США) — Global Trading Core<br/>+ US Home Region"]
         direction TB
         A["PostgreSQL (US PII):<br/>user_us, wallet_us,<br/>transaction_us, kyc_document_us"]
-        B["ClickHouse:<br/>price_history, audit_log_us"]
-        C["Aerospike:<br/>order_book (мастер),<br/>market_price (мастер),<br/>session (мастер)"]
-        D["Spaces:<br/>kyc-us-prod"]
-        E["Redis Cluster:<br/>cache (session), rate_limit"]
-        F["Redpanda:<br/>trading_events,<br/>price_updates,<br/>audit_events"]
+        B["PostgreSQL (Trading):<br/>order, trade"]
+        C["ClickHouse:<br/>price_history, audit_log_us"]
+        D["Aerospike:<br/>order_book (мастер),<br/>market_price (мастер),<br/>session (мастер)"]
+        E["Spaces:<br/>kyc-us-prod"]
+        F["Redis Cluster:<br/>cache (session), rate_limit"]
+        G["Redpanda:<br/>trading_events,<br/>price_updates,<br/>audit_events"]
     end
 
-    subgraph ams3["DigitalOcean ams3 (ЕС)"]
+    subgraph ams3["DigitalOcean ams3 (ЕС) — EU Home Region"]
         direction TB
-        G["PostgreSQL (EU PII):<br/>user_eu, wallet_eu,<br/>transaction_eu, kyc_document_eu"]
-        H["ClickHouse:<br/>price_history_replica,<br/>audit_log_eu"]
-        I["Aerospike:<br/>order_book (реплика),<br/>market_price (реплика),<br/>session (реплика)"]
-        J["Spaces:<br/>kyc-eu-prod"]
-        K["Redis Cluster:<br/>cache (session), rate_limit"]
-        L["Redpanda:<br/>price_updates_replica,<br/>audit_events_replica"]
+        H["PostgreSQL (EU PII):<br/>user_eu, wallet_eu,<br/>transaction_eu, kyc_document_eu"]
+        I["ClickHouse:<br/>price_history_replica,<br/>audit_log_eu"]
+        J["Aerospike:<br/>order_book (реплика),<br/>market_price (реплика),<br/>session (реплика)"]
+        K["Spaces:<br/>kyc-eu-prod"]
+        L["Redis Cluster:<br/>cache (session), rate_limit"]
+        M["Redpanda:<br/>price_updates_replica,<br/>audit_events_replica"]
     end
 
-    A -->|storage_path| D
-    G -->|storage_path| J
-    C -->|available_balance,<br/>total_balance| F
-    F -->|trade_executed| A
-    F -->|trade_executed| G
-    F -->|consumer → ClickHouse| B
-    L -->|consumer → ClickHouse| H
-    F -->|mirror| L
-    C -->|XDR sync| I
-    B -->|Distributed table| H
-    E -->|session cache| C
-    K -->|session cache| I
+    %% PII links
+    A -->|storage_path| E
+    H -->|storage_path| K
+
+    %% Trading core flow
+    D -->|available_balance,<br/>total_balance| G
+    G -->|trade_executed| A
+    G -->|trade_executed| H
+    G -->|WAL → PostgreSQL| B
+    G -->|consumer → ClickHouse| C
+    M -->|consumer → ClickHouse| I
+
+    %% Replication
+    G -->|mirror| M
+    D -->|XDR sync| J
+    C -->|Distributed table| I
+
+    %% Caching
+    F -->|session cache| D
+    L -->|session cache| J
 
     classDef pg fill:#4F81BD,stroke:#333,color:white
     classDef ch fill:#8064A2,stroke:#333,color:white
@@ -553,12 +562,12 @@ flowchart LR
     classDef spaces fill:#9BBB59,stroke:#333,color:white
     classDef redpanda fill:#D4AF37,stroke:#333,color:black
 
-    class A,G pg
-    class B,H ch
-    class C,I aerospike
-    class E,K redis
-    class D,J spaces
-    class F,L redpanda
+    class A,H,B pg
+    class C,I ch
+    class D,J aerospike
+    class F,L redis
+    class E,K spaces
+    class G,M redpanda
 ```
 
 ### 6.1 Выбор СУБД по таблицам
