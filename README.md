@@ -514,26 +514,26 @@
 ```mermaid
 flowchart TD
     subgraph nyc3["DigitalOcean nyc3 (США) — Global Trading Core + US Home Region"]
-        A["PostgreSQL (US PII): user_us, wallet_us, transaction_us, kyc_document_us"]
-        B["ClickHouse: price_history, audit_log_us"]
-        C["Aerospike: order_book (мастер), market_price (мастер), session (мастер)"]
-        D["Spaces: kyc-us-prod"]
-        E["Redis Cluster: cache (session), rate_limit"]
-        F["Redpanda: trading_events, price_updates, audit_events"]
+        A["PostgreSQL (US PII):<br/>user_us, wallet_us,<br/>transaction_us, kyc_document_us"]
+        B["ClickHouse:<br/>price_history, audit_log_us"]
+        C["Aerospike:<br/>order_book (мастер),<br/>market_price (мастер),<br/>session (мастер)"]
+        D["Spaces:<br/>kyc-us-prod"]
+        E["Redis Cluster:<br/>cache (session), rate_limit"]
+        F["Redpanda:<br/>trading_events,<br/>price_updates,<br/>audit_events"]
     end
 
     subgraph ams3["DigitalOcean ams3 (ЕС) — EU Home Region"]
-        G["PostgreSQL (EU PII): user_eu, wallet_eu, transaction_eu, kyc_document_eu"]
-        H["ClickHouse: price_history_replica, audit_log_eu"]
-        I["Aerospike: order_book (реплика), market_price (реплика), session (реплика)"]
-        J["Spaces: kyc-eu-prod"]
-        K["Redis Cluster: cache (session), rate_limit"]
-        L["Redpanda: price_updates_replica, audit_events_replica"]
+        G["PostgreSQL (EU PII):<br/>user_eu, wallet_eu,<br/>transaction_eu, kyc_document_eu"]
+        H["ClickHouse:<br/>price_history_replica,<br/>audit_log_eu"]
+        I["Aerospike:<br/>order_book (реплика),<br/>market_price (реплика),<br/>session (реплика)"]
+        J["Spaces:<br/>kyc-eu-prod"]
+        K["Redis Cluster:<br/>cache (session), rate_limit"]
+        L["Redpanda:<br/>price_updates_replica,<br/>audit_events_replica"]
     end
 
     A -->|storage_path| D
     G -->|storage_path| J
-    C -->|available_balance, total_balance| F
+    C -->|available_balance,<br/>total_balance| F
     F -->|trade_executed| A
     F -->|trade_executed| G
     F -->|consumer → ClickHouse| B
