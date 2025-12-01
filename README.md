@@ -972,7 +972,7 @@ flowchart LR
 
 ## 10. Схема проекта
 
-[Схема проекта](https://miro.com/welcomeonboard/Tm9zL2hzQ1JzUEl4dDFoRXBlZ1NrOVJJNndYUUZrLys3K25GblNMTWlPek5IS2ZpK29nVnEzL3FQT0dOT0t6Q2VadTZHZXdTSldVTFNWRUF5NldVOHZKNTJCZmpuOXZKNWg3SEhqb2g1Z1hHMmRiczVpaVJkU3o5bVFsVUdJMGZyVmtkMG5hNDA3dVlncnBvRVB2ZXBnPT0hdjE=?share_link_id=149420160072)
+[(Схема проекта)https://miro.com/app/board/uXjVI4lUjXQ=/?share_link_id=508058541500]
 
 ---
 
